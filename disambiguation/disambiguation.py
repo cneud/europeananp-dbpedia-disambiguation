@@ -1,10 +1,12 @@
-import solr
+#!/usr/bin/env python
+
 import sys
-import json
-import re
+
 import fuzzycomp
-import locale
+import json
 import math
+import re
+import solr
 
 LANG = "en"
 
@@ -15,11 +17,12 @@ CUTOFF_SIMILARITY = 0.6
 CUTOFF_TOTAL_SCORE = 0.02
 
 
-def _escapeQueryString(toEscape):
+def _escape(toEscape):
     replaceCharacter = ["+", "-", "&&", "||", "!", "(", ")", "{",
                         "}", "[", "]", "^", "\"", "~", "*", "?", ":"]
 
     cleaned = toEscape.rstrip().lstrip()
+
     for c in replaceCharacter:
         cleaned = cleaned.replace(c, '\\' + c)
     return cleaned
@@ -42,7 +45,7 @@ def _stringSimilarity(a, b):
         if (sa and sb and len(sa) > 0 and len(sb) > 0):
             jaro = fuzzycomp.jaro_winkler(a.encode('utf-8'),
                                           b.encode('utf-8'), 0.1)
-            jaro *= (float(len(intersect)) / float(max(len(sa), len(sb))))
+            jaro *= float(len(intersect)) / float(max(len(sa), len(sb)))
             return jaro
         else:
             return 0.0
@@ -58,21 +61,30 @@ def disambiguateList(entityStrings):
 
 
 def linkEntity(namedEntityString):
-    cleaned = _escapeQueryString(unicode(namedEntityString.decode('utf-8').lower()))
-    labelQuery = "label_" + LANG + ":\"" + cleaned + "\"^2000 " + " ".join(["label_" + LANG + ":" + elt for elt in cleaned.split(" ")])
-    redirectLabelQuery="redirectLabel:\"" +cleaned + "\"^2000 " + " ".join(["redirectLabel:"+elt for elt in cleaned.split(" ")])
+    cleaned = _escape(namedEntityString.decode('utf-8').lower())
+
+    prefix = "label_" + LANG + ":"
+    labelQuery = "label_" + LANG + ":\"" + cleaned + "\"^2000 "
+    labelQuery += " ".join([prefix + elt for elt in cleaned.split(" ")])
+
+    prefix = "redirectLabel:"
+    redirectLabelQuery = "redirectLabel:\"" + cleaned + "\"^2000 "
+    redirectLabelQuery += " ".join([prefix + e for e in cleaned.split(" ")])
+
+    query = "((" + labelQuery + ") OR (" + redirectLabelQuery + "))"
+    query += " AND _val_:inlinks^10"
+    query += " AND (schemaorgtype:Person^10 OR"
+    query += " schemaorgtype:Place OR"
+    query += " schemaorgtype:Organization)"
+
+    filter_query = "schemaorgtype:Person OR"
+    filter_query += " schemaorgtype:Place OR"
+    filter_query += " schemaorgtype:Organization"
+
     try:
-        result = s.raw_query(q="\
-  		(("+labelQuery+") OR ("+redirectLabelQuery+")) \
-                AND _val_:inlinks^10 \
-                AND (schemaorgtype:Person^10 OR schemaorgtype:Place OR schemaorgtype:Organization)",
-                fq="schemaorgtype:Person OR schemaorgtype:Place OR schemaorgtype:Organization",
-                fl="* score",
-                rows=5,
-                indent="on",
-                wt="json")
-    except Exception, e:
-        print e
+        result = s.raw_query(q=query, fq=filter_query,
+                             fl="* score", rows=5, indent="on", wt="json")
+    except Exception:
         return None
 
     bestMatch = None
@@ -84,8 +96,8 @@ def linkEntity(namedEntityString):
     score = -1.0
     sumScore = 0.0
 
-    sumLabels = dict()
-    mainLabels = dict()
+    sum_labels = dict()
+    main_labels = dict()
 
     for d in jsonResult["response"]["docs"]:
         if (d.get("score")/maxScore) > CUTOFF_RELEVANCY:
@@ -95,25 +107,22 @@ def linkEntity(namedEntityString):
             if labels is None:
                 labels = []
 
-            mainLabels[d.get("id")] = d.get("label_" + LANG)
-            sumLabels[d.get("id")] = [(_cleanedLabel(d.get("label_" + LANG)),
-                                      d.get("score"))]
-
+            main_labels[d.get("id")] = d.get("label_" + LANG)
+            sum_labels[d.get("id")] = [(_cleanedLabel(d.get("label_" + LANG)),
+                                       d.get("score"))]
         for l in labels:
-            sumLabels[d.get("id")].append((_cleanedLabel(l), d.get("score")))
+            sum_labels[d.get("id")].append((_cleanedLabel(l), d.get("score")))
 
-    for d in sumLabels.keys():
-        for l in sumLabels.get(d):
-            similarityScore = _stringSimilarity(cleaned, l[0])
-
-            if similarityScore > CUTOFF_SIMILARITY:
+    for d in sum_labels.keys():
+        for l in sum_labels.get(d):
+            sim_score = _stringSimilarity(cleaned, l[0])
+            if sim_score > CUTOFF_SIMILARITY:
                 relativeRelevancyScore = l[1] / sumScore
-                labelScore = similarityScore * math.sqrt(relativeRelevancyScore)
-
+                labelScore = sim_score * math.sqrt(relativeRelevancyScore)
                 if labelScore > score:
                     bestMatch = d
-                    bestMatchMainLabel=mainLabels[d]
-                    score=labelScore
+                    bestMatchMainLabel = main_labels[d]
+                    score = labelScore
 
     if score > CUTOFF_TOTAL_SCORE:
         return bestMatch, score, bestMatchMainLabel
@@ -121,4 +130,4 @@ def linkEntity(namedEntityString):
         return None, -1.0, bestMatchMainLabel
 
 if __name__ == '__main__':
-    print linkEntity(sys.argv[1])
+    print(linkEntity(sys.argv[1]))
